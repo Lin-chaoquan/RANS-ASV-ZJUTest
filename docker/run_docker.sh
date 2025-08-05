@@ -1,7 +1,7 @@
 docker run --name isaac-sim-oige --entrypoint bash -it -d --gpus all -e "ACCEPT_EULA=Y" --rm --network=host \
--v /etc/vulkan/icd.d/nvidia_icd.json:/etc/vulkan/icd.d/nvidia_icd.json \
--v /etc/vulkan/implicit_layer.d/nvidia_layers.json:/etc/vulkan/implicit_layer.d/nvidia_layers.json \
--v ${PWD}:/workspace/omniisaacgymenvs \
+-v /usr/share/vulkan/icd.d/nvidia_icd.json:/etc/vulkan/icd.d/nvidia_icd.json \
+-v /usr/share/vulkan/implicit_layer.d/nvidia_layers.json:/etc/vulkan/implicit_layer.d/nvidia_layers.json \
+-v /home/rm/RANS-ASV-IROS2024:/workspace/omniisaacgymenvs \
 -v ~/docker/isaac-sim/cache/ov:/root/.cache/ov:rw \
 -v ~/docker/isaac-sim/cache/pip:/root/.cache/pip:rw \
 -v ~/docker/isaac-sim/cache/glcache:/root/.cache/nvidia/GLCache:rw \

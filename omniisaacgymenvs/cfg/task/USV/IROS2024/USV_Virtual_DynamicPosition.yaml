@@ -2,13 +2,13 @@
 name: USVVirtual
 
 physics_engine: ${..physics_engine}
-experiment: USV_Virtual_CaptureXY_Nominal-DR0
+experiment: USV_Virtual_DynamicPosition
 
 # if given, will override the device setting in gym. 
 env:
-  numEnvs: ${resolve_default:512,${...num_envs}}
+  numEnvs: ${resolve_default:4096,${...num_envs}}
   envSpacing: 5
-  maxEpisodeLength: 3000
+  maxEpisodeLength: 5000
   enableDebugVis: False
   action_mode: Continuous
   numQuantizedActions: 1
@@ -28,8 +28,8 @@ env:
   wind:
 
   water_current:
-    use_water_current: False
-    flow_velocity: [0.0, 0.0, 0.0] # x, y, z
+    use_water_current: True
+    flow_velocity: [1.0, 0.0, 1.0] # x, y, z
 
   disturbances:
     forces:
@@ -115,33 +115,36 @@ env:
       right_rand: 0.0 # If it is 0.2 it means 0.8 to 1.2
 
   task_parameters: 
-    name: CaptureXY
+    name: DynamicPosition
     position_tolerance: 0.1 # 0.1 default
-    kill_after_n_steps_in_tolerance: 1 # 1 means kill after arriving at the goal
+    kill_after_n_steps_in_tolerance: 100 # 1 means kill after arriving at the goal
     max_spawn_dist: 12.0
     min_spawn_dist: 0.3
     kill_dist: 20.0
     boundary_cost: 25.0
-    goal_reward: 30.0 # Goal reward for reaching the goal
+    goal_reward: 500.0 # Goal reward for reaching the goal
     time_reward: -0.2 # Time penalty for each step
 
   reward_parameters:
-    name: CaptureXY
+    name: DynamicPosition
     reward_mode: linear
     exponential_reward_coeff: 0.25
+    align_la1: 0.02
+    align_la2: -10.0
+    align_la3: -0.1
 
   penalties_parameters:
     penalize_energy: True
     penalize_energy_fn: "lambda x,step : (torch.exp(-torch.sum(x**2, dim=-1)) - 1.0) * 0.01" 
     penalize_energy_c1: 0.00 # Not used in this version
     penalize_energy_c2: 0.00 # Not used in this version
-    penalize_linear_velocities: False
-    penalize_linear_velocities_fn: "lambda x,step: -torch.norm(x, dim=-1)*0.01"
+    penalize_linear_velocities: True
+    penalize_linear_velocities_fn: "lambda x,step: torch.where(torch.norm(x, dim=-1)>5.0, -torch.norm(x, dim=-1)*0.1, torch.zeros_like(torch.norm(x, dim=-1)))"
     penalize_linear_velocities_c1: 0.00 # Not used in this version
     penalize_linear_velocities_c2: 0.00 # Not used in this version
     penalize_angular_velocities: False
     penalize_angular_velocities_fn: "lambda x,step : -torch.abs(x)*0.01 + 0.0"
-    penalize_angular_velocities_c1: 0.00 # Not used in this version
+    penalize_angular_velocities_c1: 0.01 # Not used in this version
     penalize_angular_velocities_c2: 0.00 # Not used in this version
     penalize_angular_velocities_variation: True
     penalize_angular_velocities_variation_fn: "lambda x,step: (torch.exp(-0.033 * torch.abs(x)) - 1.0) * 1.0"

@@ -19,7 +19,10 @@ from omni.isaac.core.materials import PhysicsMaterial
 from omni.isaac.core.utils.string import find_unique_string_name
 from omni.isaac.core.utils.prims import get_prim_at_path, is_prim_path_valid
 from omniisaacgymenvs.utils.shape_utils import Pin
-
+from pxr import Usd, UsdGeom, Gf
+import torch
+import math
+import omni.usd
 
 class VisualPin(XFormPrim, Pin):
     """_summary_
@@ -227,3 +230,40 @@ class DynamicPin(RigidPrim, FixedPin):
             linear_velocity=linear_velocity,
             angular_velocity=angular_velocity,
         )
+
+class VisualCircleLine:
+    """
+    用USD BasisCurves在场景中以线段组成圆形电子围栏
+    """
+
+    def __init__(
+        self,
+        prim_path: str,
+        center,
+        radius: float,
+        num_points: int = 64,
+        color=(0, 1, 0),
+        width: float = 2.0,
+        device: torch.device = torch.device("cpu"),
+    ):
+        # 生成圆周点
+        center = torch.tensor(center, device=device)
+        theta = torch.linspace(0, 2 * math.pi, num_points, device=device)
+        x = center[0] + radius * torch.cos(theta)
+        y = center[1] + radius * torch.sin(theta)
+        z = torch.full_like(x, center[2] if center.shape[0] > 2 else 0.0)
+        points = torch.stack([x, y, z], dim=-1).cpu().numpy()
+        # 闭合圆
+        points = np.vstack([points, points[0]])
+
+        # 获取USD stage
+        stage = omni.usd.get_context().get_stage()
+        # 创建BasisCurves
+        curve_prim = UsdGeom.BasisCurves.Define(stage, prim_path)
+        curve_prim.CreatePointsAttr([Gf.Vec3f(float(p[0]), float(p[1]), float(p[2])) for p in points])
+        curve_prim.CreateCurveVertexCountsAttr([len(points)])
+        curve_prim.CreateWidthsAttr([width])
+        curve_prim.CreateTypeAttr("linear")
+        # 设置颜色
+        display_color = [Gf.Vec3f(*color)]
+        curve_prim.CreateDisplayColorAttr(display_color)

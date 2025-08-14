@@ -374,7 +374,6 @@ class USVVirtual(RLTask):
 
         # Add arrows to scene if task is go to pose
         scene, self._marker = self.task.add_visual_marker_to_scene(scene)
-        scene, self._fence = self.task.add_fence_to_scene(scene)
         return
 
     def get_heron(self):
@@ -400,13 +399,9 @@ class USVVirtual(RLTask):
         self.task.generate_target(
             self.default_zero_env_path, self._default_marker_position
         )
-        
-        self.task.generate_fence(
-            self.default_zero_env_path, 
-            self._default_marker_position,
-            0.5,  # fence height
-            64
-        )
+        # 对于泊船任务，需要生成泊船标记
+        if hasattr(self.task, 'generate_berth'):
+            self.task.generate_berth(self.default_zero_env_path)
 
     def get_USV_dynamics(self):
         """create physics"""

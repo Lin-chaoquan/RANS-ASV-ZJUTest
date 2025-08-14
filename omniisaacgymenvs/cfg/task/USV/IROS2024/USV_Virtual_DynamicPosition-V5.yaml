@@ -2,7 +2,7 @@
 name: USVVirtual
 
 physics_engine: ${..physics_engine}
-experiment: USV_Virtual_DynamicPosition-V6
+experiment: USV_Virtual_DynamicPosition-V6 #V5 and V6
 
 # if given, will override the device setting in gym. 
 env:

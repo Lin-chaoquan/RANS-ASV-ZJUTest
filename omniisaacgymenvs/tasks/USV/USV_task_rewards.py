@@ -302,7 +302,7 @@ class TrackXYVelocityReward:
 @dataclass
 class DynamicPositionReward:
     """ "
-    Reward function and parameters for the CaptureXY task."""
+    Reward function and parameters for the DynamicPosition task with electronic anchor effect."""
 
     prev_position_error = None
     reward_mode: str = "exponential"
@@ -312,6 +312,14 @@ class DynamicPositionReward:
     align_la1: float = 0.02
     align_la2: float = -10.0
     align_la3: float = -0.1
+    # Electronic anchor parameters
+    anchor_scale: float = 1.0  # 电子锚奖励权重
+    anchor_tolerance: float = 0.1  # 电子锚容差
+    velocity_penalty_scale: float = 0.1  # 速度惩罚权重
+    # Yaw oscillation control parameters
+    angular_velocity_penalty_scale: float = 0.3  # 角速度惩罚权重
+    heading_tolerance: float = 0.1  # 航向容差 (rad)
+    adaptive_alignment: bool = True  # 是否使用自适应对齐奖励
 
     def __post_init__(self) -> None:
         """
@@ -331,18 +339,20 @@ class DynamicPositionReward:
         heading_error: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Defines the function used to compute the reward for the CaptureXY task."""
+        Defines the function used to compute the reward for the DynamicPosition task with electronic anchor effect."""
         if self.prev_position_error is None:
             self.prev_position_error = position_error
 
+        # 超稳定的距离奖励 - 确保总是正奖励
         if self.reward_mode.lower() == "linear":
-            distance_reward = self.position_scale * (
-                self.prev_position_error - position_error
-            )
+            # 基础距离奖励，确保不会为负
+            distance_improvement = self.prev_position_error - position_error
+            base_distance_reward = self.position_scale * torch.clamp(distance_improvement, min=0.0)
+            # 额外的位置奖励，基于当前位置误差
+            position_reward = self.position_scale * torch.exp(-position_error / 0.5)  # 指数衰减
+            distance_reward = base_distance_reward + position_reward
         elif self.reward_mode.lower() == "square":
-            distance_reward = self.position_scale * (
-                self.prev_position_error.pow(2) - position_error.pow(2)
-            )
+            distance_reward = self.position_scale * (self.prev_position_error.pow(2) - position_error.pow(2))
         elif self.reward_mode.lower() == "exponential":
             distance_reward = self.position_scale * (
                 torch.exp(-position_error / self.exponential_reward_coeff)
@@ -351,15 +361,186 @@ class DynamicPositionReward:
         else:
             raise ValueError("Unknown reward type.")
 
-        alignment_reward = self.align_la1 * (
-            torch.exp(self.align_la2 * heading_error.pow(4))
-            + torch.exp(self.align_la3 * heading_error.pow(2))
+        # 超强电子锚奖励 - 在目标附近提供极强的稳定力
+        anchor_reward = torch.where(
+            position_error < self.anchor_tolerance,
+            self.anchor_scale * 5.0 * torch.exp(-position_error / (self.anchor_tolerance * 0.3)),  # 强指数衰减
+            torch.zeros_like(position_error)
         )
+
+        # 超强速度惩罚 - 强烈抑制任何运动
+        velocity_penalty = torch.zeros_like(position_error)
+        if 'linear_velocity' in current_state:
+            velocity_magnitude = torch.norm(current_state['linear_velocity'], dim=-1)
+            # 全局速度惩罚，但在接近目标时更强
+            global_penalty = -self.velocity_penalty_scale * 0.5 * velocity_magnitude
+            target_penalty = torch.where(
+                position_error < self.anchor_tolerance,
+                -self.velocity_penalty_scale * 2.0 * velocity_magnitude,  # 2倍惩罚
+                torch.zeros_like(position_error)
+            )
+            velocity_penalty = global_penalty + target_penalty
+
+        # 超强角速度惩罚 - 强烈抑制旋转
+        angular_velocity_penalty = torch.zeros_like(position_error)
+        if 'angular_velocity' in current_state:
+            yaw_velocity = torch.abs(current_state['angular_velocity'])
+            # 全局角速度惩罚，但在接近目标时更强
+            global_penalty = -self.angular_velocity_penalty_scale * 0.5 * yaw_velocity
+            target_penalty = torch.where(
+                position_error < self.anchor_tolerance,
+                -self.angular_velocity_penalty_scale * 2.0 * yaw_velocity,  # 2倍惩罚
+                torch.zeros_like(position_error)
+            )
+            angular_velocity_penalty = global_penalty + target_penalty
+
+        # 极简对齐奖励 - 只在非常接近目标时考虑
+        if self.adaptive_alignment:
+            # 只在非常接近目标时给予对齐奖励
+            alignment_reward = torch.where(
+                position_error < self.anchor_tolerance * 0.3,  # 更小的范围
+                self.align_la1 * 0.1 * torch.exp(self.align_la2 * heading_error.pow(2)),  # 极小的权重
+                torch.zeros_like(position_error)
+            )
+        else:
+            alignment_reward = self.align_la1 * torch.exp(self.align_la2 * heading_error.pow(2))
 
         # Update previous position error
         self.prev_position_error = position_error
 
-        return distance_reward, alignment_reward
+        return distance_reward + anchor_reward + velocity_penalty + angular_velocity_penalty, alignment_reward
+
+
+@dataclass
+class BerthingReward:
+    """
+    Reward function and parameters for the Berthing task."""
+
+    # 基础奖励权重
+    position_scale: float = 15.0  # 位置奖励权重
+    heading_scale: float = 8.0  # 航向奖励权重
+    velocity_penalty_scale: float = 3.0  # 速度惩罚权重
+    angular_velocity_penalty_scale: float = 4.0  # 角速度惩罚权重
+    
+    # 泊船特定奖励
+    approach_reward_scale: float = 5.0  # 接近奖励权重
+    alignment_reward_scale: float = 3.0  # 对齐奖励权重
+    stability_reward_scale: float = 2.0  # 稳定性奖励权重
+    
+    # 碰撞检测
+    collision_penalty: float = -50.0  # 碰撞惩罚
+    wall_distance_threshold: float = 0.8  # 墙距离阈值
+    
+    # 成功检测
+    success_reward: float = 100.0  # 成功奖励
+    position_tolerance: float = 0.2  # 位置容差
+    heading_tolerance: float = 0.1  # 航向容差
+    
+    # 时间控制
+    time_penalty_scale: float = 0.01  # 时间惩罚权重
+
+    def __post_init__(self) -> None:
+        """
+        Checks that the reward parameters are valid."""
+        pass
+
+    def compute_reward(
+        self,
+        current_state: dict,
+        actions: torch.Tensor,
+        position_error: torch.Tensor,
+        heading_error: torch.Tensor,
+        berth_corners: torch.Tensor,
+        collision_radius: float = 0.5,
+    ) -> torch.Tensor:
+        """
+        Defines the function used to compute the reward for the Berthing task."""
+        
+        # 1. 位置奖励 - 基于到船位中心的距离
+        position_reward = self.position_scale * torch.exp(-position_error / 2.0)
+        
+        # 2. 航向奖励 - 基于航向误差
+        heading_reward = self.heading_scale * torch.exp(-heading_error / 0.5)
+        
+        # 3. 速度惩罚
+        velocity_penalty = torch.zeros_like(position_error)
+        if 'linear_velocity' in current_state:
+            velocity_magnitude = torch.norm(current_state['linear_velocity'], dim=-1)
+            velocity_penalty = -self.velocity_penalty_scale * velocity_magnitude
+        
+        # 4. 角速度惩罚
+        angular_velocity_penalty = torch.zeros_like(position_error)
+        if 'angular_velocity' in current_state:
+            yaw_velocity = torch.abs(current_state['angular_velocity'])
+            angular_velocity_penalty = -self.angular_velocity_penalty_scale * yaw_velocity
+        
+        # 5. 碰撞惩罚 - 检查与船位边界的碰撞
+        collision_penalty = self._check_collision_with_berth(
+            current_state['position'], berth_corners, collision_radius
+        )
+        
+        # 6. 成功奖励
+        success_reward = self._check_success(position_error, heading_error)
+        
+        # 7. 时间惩罚
+        time_penalty = -self.time_penalty_scale * torch.ones_like(position_error)
+        
+        return (position_reward + heading_reward + velocity_penalty + 
+                angular_velocity_penalty + collision_penalty + success_reward + time_penalty)
+    
+    def _check_collision_with_berth(self, usv_position, berth_corners, collision_radius):
+        """
+        检查USV与船位的碰撞
+        berth_corners: [num_envs, 4, 2] 每个环境的船位四个角点
+        """
+        num_envs = usv_position.shape[0]
+        collision_penalty = torch.zeros(num_envs, device=usv_position.device, dtype=usv_position.dtype)
+        
+        # 为每个环境检查碰撞
+        for env_id in range(num_envs):
+            # 检查与每条边的距离
+            for i in range(4):
+                wall_start = berth_corners[env_id, i]
+                wall_end = berth_corners[env_id, (i + 1) % 4]
+                
+                # 计算到墙的距离
+                wall_distance = self._point_to_line_distance(
+                    usv_position[env_id:env_id+1], 
+                    wall_start.unsqueeze(0), 
+                    wall_end.unsqueeze(0)
+                )
+                
+                # 如果距离小于碰撞半径，给予惩罚
+                if wall_distance < collision_radius:
+                    collision_penalty[env_id] = self.collision_penalty
+                    break
+        
+        return collision_penalty
+    
+    def _point_to_line_distance(self, point, line_start, line_end):
+        """计算点到线段的距离"""
+        line_vec = line_end - line_start
+        point_vec = point - line_start
+        
+        line_length = torch.norm(line_vec, dim=-1)
+        line_length = torch.clamp(line_length, min=1e-6)  # 避免除零
+        
+        # 计算投影参数
+        t = torch.sum(point_vec * line_vec, dim=-1) / (line_length ** 2)
+        t = torch.clamp(t, 0, 1)
+        
+        # 最近点
+        closest_point = line_start + t.unsqueeze(-1) * line_vec
+        
+        return torch.norm(point - closest_point, dim=-1)
+    
+    def _check_success(self, position_error, heading_error):
+        """检查是否成功泊船"""
+        position_success = position_error < self.position_tolerance
+        heading_success = heading_error < self.heading_tolerance
+        success = position_success & heading_success
+        
+        return torch.where(success, self.success_reward, torch.zeros_like(position_error))
 
 @dataclass
 class TrackXYOVelocityReward:

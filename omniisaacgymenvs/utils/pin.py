@@ -231,39 +231,120 @@ class DynamicPin(RigidPrim, FixedPin):
             angular_velocity=angular_velocity,
         )
 
-class VisualCircleLine:
+class VisualRectangleLine:
     """
-    用USD BasisCurves在场景中以线段组成圆形电子围栏
+    使用 USD BasisCurves 绘制矩形轮廓。
+    参数
+    - prim_path: USD 绝对路径，例如 /World/envs/env_0/rect
+    - center: [x, y, z] 或 [x, y]（z 省略则默认为 0）
+    - size: [length_x, length_y]，矩形的长宽
+    - yaw: 绕 Z 轴的偏航角（弧度）
+    - color: (r, g, b)，0~1
+    - width: 线宽
+    - device: torch 设备，用于张量计算（可选）
     """
-
     def __init__(
         self,
         prim_path: str,
         center,
-        radius: float,
-        num_points: int = 64,
-        color=(0, 1, 0),
+        size,
+        yaw: float = 0.0,
+        color=(1.0, 0.0, 0.0),
         width: float = 2.0,
         device: torch.device = torch.device("cpu"),
+        closed: bool = True,
     ):
-        # 生成圆周点
-        center = torch.tensor(center, device=device)
-        theta = torch.linspace(0, 2 * math.pi, num_points, device=device)
-        x = center[0] + radius * torch.cos(theta)
-        y = center[1] + radius * torch.sin(theta)
-        z = torch.full_like(x, center[2] if center.shape[0] > 2 else 0.0)
-        points = torch.stack([x, y, z], dim=-1).cpu().numpy()
-        # 闭合圆
-        points = np.vstack([points, points[0]])
+        # 准备输入
+        center = torch.tensor(center, dtype=torch.float32, device=device)
+        if center.numel() == 2:
+            center = torch.tensor([center[0], center[1], 0.0], dtype=torch.float32, device=device)
 
-        # 获取USD stage
+        size = torch.tensor(size, dtype=torch.float32, device=device)
+        assert size.numel() == 2, "size 应为 [length_x, length_y]"
+        hx, hy = size[0] * 0.5, size[1] * 0.5
+
+        # 局部四个角点（逆时针）
+        corners_local = torch.tensor(
+            [
+                [-hx, -hy, 0.0],
+                [ hx, -hy, 0.0],
+                [ hx,  hy, 0.0],
+                [-hx,  hy, 0.0],
+            ],
+            dtype=torch.float32,
+            device=device,
+        )
+
+        # 绕 Z 轴旋转
+        c, s = math.cos(float(yaw)), math.sin(float(yaw))
+        R = torch.tensor([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]], dtype=torch.float32, device=device)
+        corners_world = (corners_local @ R.T) + center  # [4,3]
+
+        # 闭合
+        if closed:
+            corners_world = torch.vstack([corners_world, corners_world[0]])
+
+        # 写入 USD BasisCurves
         stage = omni.usd.get_context().get_stage()
-        # 创建BasisCurves
         curve_prim = UsdGeom.BasisCurves.Define(stage, prim_path)
-        curve_prim.CreatePointsAttr([Gf.Vec3f(float(p[0]), float(p[1]), float(p[2])) for p in points])
-        curve_prim.CreateCurveVertexCountsAttr([len(points)])
-        curve_prim.CreateWidthsAttr([width])
+        # 线型为折线
         curve_prim.CreateTypeAttr("linear")
-        # 设置颜色
-        display_color = [Gf.Vec3f(*color)]
+        # 点集
+        pts = corners_world.detach().cpu().numpy().tolist()
+        curve_prim.CreatePointsAttr([Gf.Vec3f(float(p[0]), float(p[1]), float(p[2])) for p in pts])
+        # 顶点计数（一个曲线）
+        curve_prim.CreateCurveVertexCountsAttr([len(pts)])
+        # 宽度（每点一个，避免 hydra 宽度插值警告）
+        curve_prim.CreateWidthsAttr([float(width)] * len(pts))
+        # 颜色
+        display_color = [Gf.Vec3f(float(color[0]), float(color[1]), float(color[2]))]
         curve_prim.CreateDisplayColorAttr(display_color)
+
+    @staticmethod
+    def update(
+        prim_path: str,
+        center,
+        size,
+        yaw: float = 0.0,
+        width: Optional[float] = None,
+        color: Optional[Sequence[float]] = None,
+        device: torch.device = torch.device("cpu"),
+        closed: bool = True,
+    ):
+        """更新已存在矩形的 points/width/color。"""
+        stage = omni.usd.get_context().get_stage()
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim or not prim.IsValid():
+            raise RuntimeError(f"Prim {prim_path} 不存在")
+
+        center = torch.tensor(center, dtype=torch.float32, device=device)
+        if center.numel() == 2:
+            center = torch.tensor([center[0], center[1], 0.0], dtype=torch.float32, device=device)
+        size = torch.tensor(size, dtype=torch.float32, device=device)
+        hx, hy = size[0] * 0.5, size[1] * 0.5
+
+        corners_local = torch.tensor(
+            [
+                [-hx, -hy, 0.0],
+                [ hx, -hy, 0.0],
+                [ hx,  hy, 0.0],
+                [-hx,  hy, 0.0],
+            ],
+            dtype=torch.float32,
+            device=device,
+        )
+        c, s = math.cos(float(yaw)), math.sin(float(yaw))
+        R = torch.tensor([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]], dtype=torch.float32, device=device)
+        corners_world = (corners_local @ R.T) + center
+        if closed:
+            corners_world = torch.vstack([corners_world, corners_world[0]])
+
+        pts = corners_world.detach().cpu().numpy().tolist()
+        curve = UsdGeom.BasisCurves(prim)
+        curve.GetPointsAttr().Set([Gf.Vec3f(float(p[0]), float(p[1]), float(p[2])) for p in pts])
+        curve.GetCurveVertexCountsAttr().Set([len(pts)])
+
+        if width is not None:
+            curve.GetWidthsAttr().Set([float(width)] * len(pts))
+        if color is not None:
+            curve.GetDisplayColorAttr().Set([Gf.Vec3f(float(color[0]), float(color[1]), float(color[2]))])

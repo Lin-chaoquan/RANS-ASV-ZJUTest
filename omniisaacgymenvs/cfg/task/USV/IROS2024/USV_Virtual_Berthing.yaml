@@ -2,11 +2,11 @@
 name: USVVirtual
 
 physics_engine: ${..physics_engine}
-experiment: USV_Virtual_DynamicPosition-V6
+experiment: USV_Virtual_Berthing-V1
 
 # if given, will override the device setting in gym. 
 env:
-  numEnvs: ${resolve_default:4096,${...num_envs}}
+  numEnvs: ${resolve_default:512,${...num_envs}}
   envSpacing: 5
   maxEpisodeLength: 5000
   enableDebugVis: False
@@ -116,32 +116,44 @@ env:
       right_rand: 0.0 # If it is 0.2 it means 0.8 to 1.2
 
   task_parameters: 
-    name: DynamicPosition
-    position_tolerance: 0.1 # 0.1 default
-    kill_after_n_steps_in_tolerance: 100 # 1 means kill after arriving at the goal
-    max_spawn_dist: 12.0
-    min_spawn_dist: 0.3
-    kill_dist: 20.0
-    boundary_cost: 25.0
-    goal_reward: 500.0 # Goal reward for reaching the goal
-    time_reward: -0.2 # Time penalty for each step
+    name: Berthing
+    # 泊船任务参数
+    berth_center: [0.0, 0.0]  # 船位中心
+    berth_width: 2.0  # 船位宽度
+    berth_length: 3.0  # 船位长度
+    collision_radius: 0.5  # 碰撞检测半径
+    position_tolerance: 0.2  # 位置容差
+    heading_tolerance: 0.1  # 航向容差
+    kill_after_n_steps_in_tolerance: 100  # 在容差内停留步数
+    goal_reward: 500.0  # 成功奖励
+    time_reward: -0.2  # 时间惩罚
+    time_limit: 5000  # 时间限制
+    
+    # 生成参数
+    spawn_radius_min: 3.0  # 最小生成半径
+    spawn_radius_max: 8.0  # 最大生成半径
+    spawn_angle_range: 90.0  # 生成角度范围（度）
+    kill_dist: 20.0  # 终止距离
+    
+    # 课程学习参数
+    spawn_curriculum: False
+    spawn_curriculum_max_dist: 5.0
+    spawn_curriculum_min_dist: 4.0
+    spawn_curriculum_kill_dist: 15.0
+    spawn_curriculum_mode: "linear"
+    spawn_curriculum_warmup: 0
+    spawn_curriculum_end: 1000
 
   reward_parameters:
-    name: DynamicPosition
-    reward_mode: linear  # 使用线性奖励，更简单直接
-    position_scale: 20.0  # 大幅增加位置奖励权重
-    exponential_reward_coeff: 1.0  # 保留，但线性模式下不使用
-    align_la1: 0.05  # 极小的对齐奖励权重
-    align_la2: -0.2  # 极小的对齐激进性
-    align_la3: -0.05  # 保留，但简化版本不使用
-    # 电子锚参数
-    anchor_scale: 15.0  # 大幅增加电子锚权重
-    anchor_tolerance: 0.1  # 减少电子锚容差，提供更精确的稳定范围
-    velocity_penalty_scale: 1.0  # 大幅增加速度惩罚权重
-    # Yaw振荡控制参数
-    angular_velocity_penalty_scale: 1.5  # 大幅增加角速度惩罚权重，强烈抑制打转
-    heading_tolerance: 0.1  # 减少航向容差，提高精度
-    adaptive_alignment: True  # 使用自适应对齐奖励
+    name: Berthing
+    # 泊船奖励参数
+    position_scale: 20.0  # 位置奖励权重
+    heading_scale: 10.0  # 航向奖励权重
+    velocity_penalty_scale: 1.0  # 速度惩罚权重
+    angular_velocity_penalty_scale: 1.5  # 角速度惩罚权重
+    collision_penalty_scale: 50.0  # 碰撞惩罚权重
+    success_reward: 100.0  # 成功奖励
+    time_penalty_scale: 0.1  # 时间惩罚权重
 
   penalties_parameters:
     penalize_energy: True
@@ -295,3 +307,5 @@ dynamics:
   acceleration:
     alpha: 0.3
     last_time: -10.0
+
+

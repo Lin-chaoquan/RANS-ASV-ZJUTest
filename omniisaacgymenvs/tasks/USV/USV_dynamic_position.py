@@ -8,7 +8,7 @@ from omniisaacgymenvs.tasks.USV.USV_task_rewards import (
 from omniisaacgymenvs.tasks.USV.USV_task_parameters import (
     DynamicPositionParameters,
 )
-from omniisaacgymenvs.utils.pin import VisualPin,VisualCircleLine
+from omniisaacgymenvs.utils.pin import VisualPin
 
 from omni.isaac.core.prims import XFormPrimView
 
@@ -57,8 +57,8 @@ class DynamicPositionTask(Core):
             self._num_envs, dtype=torch.float, device=self._device, requires_grad=False
         )
 
-        if not "distance_reward" in stats.keys():
-            stats["distance_reward"] = torch_zeros()
+        if not "combined_reward" in stats.keys():
+            stats["combined_reward"] = torch_zeros()
         if not "alignment_reward" in stats.keys():
             stats["alignment_reward"] = torch_zeros()
         if not "position_error" in stats.keys():
@@ -124,7 +124,7 @@ class DynamicPositionTask(Core):
             self.prev_position_dist = self.position_dist
 
         # Rewards
-        self.distance_reward, self.alignment_reward = (
+        self.combined_reward, self.alignment_reward = (
             self._reward_parameters.compute_reward(
                 current_state,
                 actions,
@@ -133,7 +133,7 @@ class DynamicPositionTask(Core):
             )
         )
 
-        self.distance_reward[self.just_had_been_reset] = 0
+        self.combined_reward[self.just_had_been_reset] = 0
         self.just_had_been_reset = torch.tensor(
             [], device=self._device, dtype=torch.long
         )
@@ -144,11 +144,11 @@ class DynamicPositionTask(Core):
         # Save position_dist for next calculation, as prev_position_dist
         self.prev_position_dist = self.position_dist
 
-        # print(f"distance_reward", self.distance_reward)
+        # print(f"combined_reward", self.combined_reward)
         # print(f"alignment_reward", self.alignment_reward)
 
         return (
-            self.distance_reward
+            self.combined_reward
             + self.alignment_reward
             + goal_reward
             + self._task_parameters.time_reward
@@ -196,7 +196,7 @@ class DynamicPositionTask(Core):
         """
         Updates the training statistics."""
 
-        stats["distance_reward"] += self.distance_reward
+        stats["combined_reward"] += self.combined_reward
         stats["alignment_reward"] += self.alignment_reward
         stats["position_error"] += self.position_dist
         stats["boundary_penalty"] += self.boundary_penalty
@@ -321,89 +321,3 @@ class DynamicPositionTask(Core):
         pins = XFormPrimView(prim_paths_expr="/World/envs/.*/pin")
         scene.add(pins)
         return scene, pins
-
-    def generate_fence(self, path, center, radius, num_points=64):
-        """
-        Generates a circular fence around the target position.
-        The fence is represented as a LinePrim with a specified radius and number of points."""
-
-        theta = torch.linspace(0, 2 * math.pi, num_points, device=center.device)
-        x = center[0] + radius * torch.cos(theta)
-        y = center[1] + radius * torch.sin(theta)
-        z = torch.full_like(x, center[2] if center.shape[0] > 2 else 0.0)
-        points = torch.stack([x, y, z], dim=-1).cpu().numpy().tolist()
-        # Close the circle
-        points.append(points[0])
-
-        # Create LinePrim
-        for i in range(self._num_envs):
-            VisualCircleLine(
-                prim_path=f"/World/envs/env_{i}/fence",
-                center=center,
-                radius=0.5,
-                num_points=64,
-                color=(0, 1, 0),  # 绿色
-                width=5.0,
-                device=torch.device("cpu"),
-            )
-    # def generate_fence(self, path, center, radius, num_points=64):
-    #     """
-    #     在目标点center处画一个半径为radius的圆形电子围栏
-    #     """
-    #     theta = torch.linspace(0, 2 * math.pi, num_points, device=center.device)
-    #     x = center[0] + radius * torch.cos(theta)
-    #     y = center[1] + radius * torch.sin(theta)
-    #     z = torch.full_like(x, center[2] if center.shape[0] > 2 else 0.0)
-    #     points = torch.stack([x, y, z], dim=-1).cpu().numpy().tolist()
-    #     # 闭合圆
-    #     points.append(points[0])
-
-    #     # 创建LinePrim
-    #     LinePrim(
-    #         prim_path=path + "/fence",
-    #         positions=points,
-    #         color=[0, 1, 0],  # 绿色
-    #         width=2.0,
-    #         name="fence"
-    #     )
-        
-    def add_fence_to_scene(self, scene):
-        """
-        Adds the fence to the scene."""
-
-        fence = XFormPrimView(prim_paths_expr="/World/envs/.*/fence",name="fence")
-        scene.add(fence)
-        return scene, fence
-    
-    # def generate_circle_with_pins(self, path, center, radius, num_points=32):
-    #     """
-    #     用多个VisualPin在center为圆心、radius为半径的圆周上画圆
-    #     """
-    #     color = torch.tensor([0, 1, 0])  # 绿色
-    #     ball_radius = 0.05
-    #     poll_radius = 0.01
-    #     poll_length = 0.1
-
-    #     theta = torch.linspace(0, 2 * math.pi, num_points, device=center.device)
-    #     x = center[0] + radius * torch.cos(theta)
-    #     y = center[1] + radius * torch.sin(theta)
-    #     z = center[2] if center.shape[0] > 2 else 0.0
-
-    #     for i in range(num_points):
-    #         pos = torch.tensor([x[i], y[i], z], device=center.device)
-    #         VisualPin(
-    #             prim_path=f"{path}/circle_pin_{i}",
-    #             translation=pos,
-    #             name=f"circle_pin_{i}",
-    #             ball_radius=ball_radius,
-    #             poll_radius=poll_radius,
-    #             poll_length=poll_length,
-    #             color=color,
-    #         )
-    # def add_visual_circle_to_scene(self, scene):
-    #         """
-    #         Adds the visual marker to the scene."""
-
-    #         pins = XFormPrimView(prim_paths_expr="/World/envs/.*/circle_pin_.*")
-    #         scene.add(pins)
-    #         return scene, pins

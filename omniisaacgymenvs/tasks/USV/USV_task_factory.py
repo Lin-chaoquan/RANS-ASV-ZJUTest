@@ -25,6 +25,9 @@ from omniisaacgymenvs.tasks.USV.USV_track_xyo_velocity import (
 from omniisaacgymenvs.tasks.USV.USV_dynamic_position import (
     DynamicPositionTask,
 )
+from omniisaacgymenvs.tasks.USV.USV_berthing import (
+    BerthingTask,
+)
 
 
 class TaskFactory:
@@ -60,4 +63,5 @@ task_factory.register("KeepXY", KeepXYTask)
 task_factory.register("TrackXYVelocity", TrackXYVelocityTask)
 task_factory.register("TrackXYOVelocity", TrackXYOVelocityTask)
 task_factory.register("DynamicPosition", DynamicPositionTask)
+task_factory.register("Berthing", BerthingTask)
 # task_factory.register("TrackXYVelocityHeading", TrackXYVelocityHeadingTask)

@@ -59,12 +59,12 @@ class BerthingTask(Core):
         
         # 船位中心设置：参考CaptureXY的实现方式
         # 不在初始化时设置固定位置，而是在get_goals中动态生成
-        print(f"=== 泊船任务初始化 ===")
+        print(f"=== 电子泊船任务初始化 ===")
         print(f"环境数量: {self._num_envs}")
-        
-        
+        print(f"任务类型: 快速泊船 + 精确定位")
+        print(f"碰撞策略: 红线绝对禁止，绿线允许接触")
         print(f"船位中心缓冲区已初始化，位置将在get_goals中设置")
-        print(f"=== 泊船任务初始化完成 ===")
+        print(f"=== 电子泊船任务初始化完成 ===")
         # 基于船位中心计算四个角点
         self._calculate_berth_corners()
 
@@ -75,6 +75,12 @@ class BerthingTask(Core):
         self.combined_reward = torch.zeros(self._num_envs, device=self._device, dtype=torch.float32)
         self.collision_detected = torch.zeros(self._num_envs, device=self._device, dtype=torch.bool)
         self._position_error = torch.zeros(self._num_envs, 2, device=self._device, dtype=torch.float32)
+        
+        # 性能优化：添加步骤计数器
+        self._current_step = 0
+        
+        # 电子泊船专用：每个环境的episode步骤计数器
+        self._episode_steps = torch.zeros(self._num_envs, device=self._device, dtype=torch.int32)
 
     def _calculate_berth_corners(self, env_ids: torch.Tensor = None):
         """
@@ -152,51 +158,53 @@ class BerthingTask(Core):
         self._task_data[:, 1] = torch.sin(alpha)
         self._task_data[:, 2] = torch.linalg.norm(self._position_error, dim=1)
         
-        # 4. 检查碰撞 - 向量化碰撞检测
-        self.collision_detected = self._check_collision(
-            torch.arange(self._num_envs, device=self._device)
-        )
+        # 4. 简化的碰撞检测 - 只在需要时计算
+        # 避免每次都进行复杂的碰撞检测
+        if not hasattr(self, '_last_collision_check_step'):
+            self._last_collision_check_step = -1
+        
+        current_step = getattr(self, '_current_step', 0)
+        if current_step - self._last_collision_check_step > 10:  # 每10步检查一次碰撞
+            self.collision_detected = self._check_collision_simple(
+                torch.arange(self._num_envs, device=self._device)
+            )
+            self._last_collision_check_step = current_step
         
         # 5. 返回观察张量
         return self.update_observation_tensor(current_state, observation_frame)
-
-    def _check_collision(self, env_ids: torch.Tensor) -> torch.Tensor:
+    
+    def _check_collision_simple(self, env_ids: torch.Tensor) -> torch.Tensor:
         """
-        优化的碰撞检测方法，使用向量化操作提高性能。
-        检查USV是否与船位边界发生碰撞。
+        简化的碰撞检测方法，提高性能。
+        使用基于距离的简单检测，而不是复杂的点到线段距离计算。
         """
         
         if len(env_ids) == 0:
             return torch.tensor([], device=self._device, dtype=torch.bool)
         
-        # 获取需要检查的环境的船位角点
-        berth_corners = self._berth_corners[env_ids]  # [num_resets, 4, 2]
+        # 获取需要检查的环境的船位中心
+        berth_centers = self._berth_centers[env_ids]  # [num_resets, 2]
         usv_positions = self._position_error[env_ids, :2]  # [num_resets, 2]
         
-        # 向量化计算所有边界的距离
-        # 计算所有边的起点和终点
-        wall_starts = berth_corners  # [num_resets, 4, 2]
-        wall_ends = torch.roll(berth_corners, shifts=1, dims=1)  # [num_resets, 4, 2]
+        # 简化的碰撞检测：基于到船位中心的距离
+        distances = torch.linalg.norm(usv_positions - berth_centers, dim=-1)
         
-        # 向量化计算到所有边的距离
-        distances = self._point_to_line_distance_vectorized(
-            usv_positions.unsqueeze(1).expand(-1, 4, -1),  # [num_resets, 4, 2]
-            wall_starts,  # [num_resets, 4, 2]
-            wall_ends     # [num_resets, 4, 2]
-        )  # [num_resets, 4]
+        # 使用船位尺寸作为碰撞检测的简化方法
+        berth_diagonal = torch.sqrt(
+            torch.tensor(self._task_parameters.berth_width ** 2 + 
+                        self._task_parameters.berth_length ** 2, 
+                        device=self._device)
+        )
         
-        # 找到每个环境的最小距离（最接近的边）
-        min_distances = torch.min(distances, dim=1)[0]  # [num_resets]
-        
-        # 检查是否发生碰撞（距离小于碰撞半径）
-        collision_radius = getattr(self._task_parameters, 'collision_radius', 0.5)
-        collisions = min_distances < collision_radius
+        # 如果距离小于船位对角线的一半，认为可能发生碰撞
+        collision_threshold = berth_diagonal * 0.4
+        collisions = distances < collision_threshold
         
         # 更新碰撞状态
         self.collision_detected[env_ids] = collisions
         
         return collisions
-    
+
     def _point_to_line_distance_vectorized(self, points, line_starts, line_ends):
         """
         向量化计算点到线段的距离，避免循环。
@@ -232,46 +240,59 @@ class BerthingTask(Core):
         """为指定环境生成船位中心"""
         # 此方法已废弃，船位中心生成逻辑已移至get_goals方法
         # 保持向后兼容，但不执行任何操作
-        print(f"_generate_berth_centers: 此方法已废弃，船位中心在get_goals中生成")
+        # print(f"_generate_berth_centers: 此方法已废弃，船位中心在get_goals中生成")
         pass
 
 
 
     def compute_reward(
-        self, current_state: torch.Tensor, actions: torch.Tensor
+        self, current_state: dict, actions: torch.Tensor
     ) -> torch.Tensor:
         """
-        优化的奖励计算函数，减少重复计算，提高性能。
+        改进的奖励计算函数，支持智能方向引导和精确碰撞检测。
         """
+
+        # 更新步骤计数器
+        self._current_step += 1
+        
+        # 更新episode步骤计数器
+        self._episode_steps += 1
 
         # 1. 计算位置距离 - 使用更高效的范数计算
         self.position_dist = torch.linalg.norm(self._position_error, dim=-1)
         
-        # 2. 计算组合奖励 - 一次性调用
+        # 2. 计算USV航向
+        usv_heading = torch.atan2(
+            current_state["orientation"][:, 1], current_state["orientation"][:, 0]
+        )
+        
+        # 3. 计算组合奖励 - 调用改进的奖励函数
         self.combined_reward = self._reward_parameters.compute_reward(
             current_state,
             actions,
             self.position_dist,
             self.heading_error,
             self._berth_corners,
-            self._task_parameters.collision_radius,
+            current_state["position"][:, :2],  # USV位置
+            usv_heading,  # USV航向
+            self._episode_steps, # 传递episode步骤计数器
         )
 
-        # 3. 重置时奖励为0 - 向量化操作
+        # 4. 重置时奖励为0 - 向量化操作
         if len(self.just_had_been_reset) > 0:
             self.combined_reward[self.just_had_been_reset] = 0
             self.just_had_been_reset = torch.tensor(
                 [], device=self._device, dtype=torch.long
             )
 
-        # 4. 检查成功状态 - 向量化计算
+        # 5. 检查成功状态 - 向量化计算
         success = self._check_success()
         goal_reward = success * self._task_parameters.goal_reward
         
-        # 5. 时间惩罚 - 预计算
+        # 6. 时间惩罚 - 预计算
         time_reward = self._task_parameters.time_reward
 
-        # 6. 返回总奖励 - 一次性计算
+        # 7. 返回总奖励 - 一次性计算
         return self.combined_reward + goal_reward + time_reward
 
     def _check_success(self):
@@ -301,33 +322,35 @@ class BerthingTask(Core):
 
     def reset(self, env_ids: torch.Tensor) -> None:
         """
-        Resets the goal_reached_flag when an agent manages to solve its task.
-        参考CaptureXY的实现方式，船位中心在get_goals中生成。
+        重置泊船任务环境。
         """
-
+        # 重置episode步骤计数器
+        self._episode_steps[env_ids] = 0
+        
+        # 重置任务数据
+        self._task_data[env_ids, :] = 0.0
+        
+        # 重置统计变量
+        self.prev_position_dist[env_ids] = 0.0
+        self.position_dist[env_ids] = 0.0
+        self.heading_error[env_ids] = 0.0
+        self.combined_reward[env_ids] = 0.0
+        self.collision_detected[env_ids] = False
+        
+        # 重置位置误差
+        self._position_error[env_ids, :] = 0.0
+        
+        # 重置目标到达状态
         self._goal_reached[env_ids] = 0
-        self.just_had_been_reset = env_ids.clone()
         
-        # 确保船位中心被正确设置（如果还没有设置的话）
-        # 这是为了处理在get_goals被调用之前就调用get_state_observations或get_spawns的情况
-        if torch.all(self._berth_centers[env_ids] == 0):
-            print(f"reset: 环境 {env_ids} 的船位中心还未设置，生成默认值")
-            # 完全按照CaptureXY：为这些环境生成船位中心
-            random_range = float(getattr(self._task_parameters, "goal_random_position", 0.0))
-            if random_range > 0.0:
-                # 在原点附近添加随机偏移
-                self._berth_centers[env_ids] = (
-                    torch.rand((len(env_ids), 2), device=self._device) * 2.0 - 1.0
-                ) * random_range
-            else:
-                # 固定在环境原点
-                self._berth_centers[env_ids] = 0.0
-            print(f"reset: 为环境 {env_ids} 生成船位中心: {self._berth_centers[env_ids]}")
+        # 重置任务标签
+        self._task_label[env_ids] = 0
         
-        # 更新船位角点（基于当前的船位中心）
-        self._calculate_berth_corners(env_ids)
+        # 更新重置标签
+        self.just_had_been_reset = env_ids
         
-        print(f"reset: 环境 {env_ids} 重置完成，船位中心: {self._berth_centers[env_ids]}")
+        # 注意：船位中心位置在get_goals方法中生成，不需要在这里生成
+        # 船位角点会在get_goals调用后通过_calculate_berth_corners更新
 
     def get_goals(
         self,
@@ -359,8 +382,11 @@ class BerthingTask(Core):
         # 完全按照CaptureXY：使用+=操作，将目标位置作为偏移量添加
         targets_position[env_ids, :2] += self._berth_centers[env_ids]
         
-        print(f"get_goals: 为环境 {env_ids} 生成船位中心偏移: {self._berth_centers[env_ids]}")
-        print(f"get_goals: 最终目标位置: {targets_position[env_ids, :2]}")
+        # 更新船位角点（基于新生成的船位中心）
+        self._calculate_berth_corners(env_ids)
+        
+        # print(f"get_goals: 为环境 {env_ids} 生成船位中心偏移: {self._berth_centers[env_ids]}")
+        # print(f"get_goals: 最终目标位置: {targets_position[env_ids, :2]}")
         
         return targets_position, targets_orientation
 
@@ -372,15 +398,15 @@ class BerthingTask(Core):
         step: int = 0,
     ) -> list:
         """
-        完全按照CaptureXY的实现方式，生成船体生成位置。
-        船体在距离目标位置（船位中心）的环形区域内生成。
+        改进的生成位置方法，支持方向引导和姿态稳定性。
+        船体在距离目标位置（船位中心）的开口方向区域内生成。
         """
 
         num_resets = len(env_ids)
         # 重置成功计数器
         self._goal_reached[env_ids] = 0
 
-        # 完全按照CaptureXY：使用课程学习逻辑
+        # 课程学习逻辑
         if self._task_parameters.spawn_curriculum:
             if step < self._task_parameters.spawn_curriculum_warmup:
                 rmax = self._task_parameters.spawn_curriculum_max_dist
@@ -413,25 +439,61 @@ class BerthingTask(Core):
             rmax = self._task_parameters.spawn_radius_max
             rmin = self._task_parameters.spawn_radius_min
 
-        # 完全按照CaptureXY：随机化生成位置
         r = torch.rand((num_resets,), device=self._device) * (rmax - rmin) + rmin
         theta = torch.rand((num_resets,), device=self._device) * 2 * math.pi
-
-        # 完全按照CaptureXY：使用+=操作，将随机偏移添加到基准位置
-        # 基准位置是initial_position（环境原点），加上随机偏移，再加上目标位置偏移
-        initial_position[env_ids, 0] += (r) * torch.cos(theta) + self._berth_centers[env_ids, 0]
-        initial_position[env_ids, 1] += (r) * torch.sin(theta) + self._berth_centers[env_ids, 1]
+        initial_position[env_ids, 0] += (r) * torch.cos(theta) + self._berth_centers[
+            env_ids, 0
+        ]
+        initial_position[env_ids, 1] += (r) * torch.sin(theta) + self._berth_centers[
+            env_ids, 1
+        ]
         initial_position[env_ids, 2] += 0
 
-        print(f"get_spawns: 环境 {env_ids} 生成位置范围: r=[{rmin:.2f}, {rmax:.2f}]")
-        print(f"get_spawns: 船位中心: {self._berth_centers[env_ids]}")
-        print(f"get_spawns: 最终生成位置: x=[{initial_position[env_ids, 0].min():.2f}, {initial_position[env_ids, 0].max():.2f}], y=[{initial_position[env_ids, 1].min():.2f}, {initial_position[env_ids, 1].max():.2f}]")
-
-        # 完全按照CaptureXY：随机化航向
+        # Randomizes the heading of the platform
         random_orient = torch.rand(num_resets, device=self._device) * math.pi
         initial_orientation[env_ids, 0] = torch.cos(random_orient * 0.5)
         initial_orientation[env_ids, 3] = torch.sin(random_orient * 0.5)
         return initial_position, initial_orientation
+        # 方向引导：限制生成角度在开口方向
+        # angle_range_rad = math.radians(self._task_parameters.spawn_angle_range)
+        # angle_offset = math.pi / 2  # 开口方向（绿边）的角度偏移
+        
+        # 为每个环境生成位置
+        # for i, env_id in enumerate(env_ids):
+        #     # 随机生成距离和角度
+        #     r = torch.rand(1, device=self._device) * (rmax - rmin) + rmin
+        #     theta = torch.rand(1, device=self._device) * angle_range_rad - angle_range_rad/2 + angle_offset
+            
+        #     # 计算生成位置（相对于船位中心）
+        #     spawn_x = r * torch.cos(theta)
+        #     spawn_y = r * torch.sin(theta)
+            
+        #     # 设置生成位置
+        #     initial_position[env_id, 0] = self._berth_centers[env_id, 0] + spawn_x
+        #     initial_position[env_id, 1] = self._berth_centers[env_id, 1] + spawn_y
+        #     initial_position[env_id, 2] = 0.0
+            
+        #     # 计算朝向船位中心的航向
+        #     target_heading = torch.atan2(
+        #         self._berth_centers[env_id, 1] - initial_position[env_id, 1],
+        #         self._berth_centers[env_id, 0] - initial_position[env_id, 0]
+        #     )
+            
+        #     # 添加小的随机偏移，避免完全对齐
+        #     # 修复：确保张量形状匹配
+        #     heading_noise = (torch.rand(1, device=self._device) - 0.5) * 0.2
+        #     target_heading = target_heading + heading_noise.squeeze()  # 使用squeeze()确保形状匹配
+            
+        #     # 设置四元数方向
+        #     initial_orientation[env_id, 0] = torch.cos(target_heading * 0.5)
+        #     initial_orientation[env_id, 3] = torch.sin(target_heading * 0.5)
+
+        # print(f"get_spawns: 环境 {env_ids} 生成位置范围: r=[{rmin:.2f}, {rmax:.2f}]")
+        # print(f"get_spawns: 船位中心: {self._berth_centers[env_ids]}")
+        # print(f"get_spawns: 最终生成位置: x=[{initial_position[env_ids, 0].min():.2f}, {initial_position[env_ids, 0].max():.2f}], y=[{initial_position[env_ids, 1].min():.2f}, {initial_position[env_ids, 1].max():.2f}]")
+        # print(f"get_spawns: 生成角度范围: {math.degrees(angle_range_rad):.1f}度，开口方向: {math.degrees(angle_offset):.1f}度")
+
+        # return initial_position, initial_orientation
 
     def update_kills(self, step) -> torch.Tensor:
         """
@@ -492,9 +554,9 @@ class BerthingTask(Core):
             color=color,
         )
         
-        print(f"为env_0创建船位中心标记: {path}/berth_center at {position}")
-        print(f"注意：实际位置将在get_goals调用后通过marker.set_world_poses更新")
-        print(f"=== generate_target 完成 ===")
+        # print(f"为env_0创建船位中心标记: {path}/berth_center at {position}")
+        # print(f"注意：实际位置将在get_goals调用后通过marker.set_world_poses更新")
+        # print(f"=== generate_target 完成 ===")
 
     def generate_berth(self, path):
         """
@@ -502,12 +564,12 @@ class BerthingTask(Core):
         绘制矩形泊船位，一面开口，三面围挡。
         使用分段线绘制：开口边为绿色，其余三边为红色；角点用 VisualPin。
         
-        暂时屏蔽，用于测试船位中心标识。
+        优化：只创建env_0的船位矩形，Isaac Sim会自动克隆到其他环境
         """
         
         print("=== generate_berth 被调用，绘制船位矩形 ===")
         
-        # 基于本地坐标系生成船位边界（每个 env 原点为中心，便于在场景创建阶段稳定显示）
+        # 基于本地坐标系生成船位边界（env_0原点为中心）
         half_width = self._task_parameters.berth_width / 2
         half_length = self._task_parameters.berth_length / 2
         base_corners = [
@@ -517,73 +579,77 @@ class BerthingTask(Core):
             (-half_width,  half_length),  # [3] 左上角（左墙）
         ]
         
-        print(f"船位尺寸: 宽度={self._task_parameters.berth_width}, 长度={self._task_parameters.berth_length}")
-        print(f"基础角点: {base_corners}")
+        # print(f"船位尺寸: 宽度={self._task_parameters.berth_width}, 长度={self._task_parameters.berth_length}")
+        # print(f"基础角点: {base_corners}")
+        # print(f"只创建env_0的船位矩形，其他环境将通过Isaac Sim自动克隆")
         
-        # 创建船位边界标记
-        for i in range(self._num_envs):
-            # 逐边绘制：0-1(底部，红)，1-2(右侧，红)，2-3(顶部开口，绿)，3-0(左侧，红）
-            edges = [
-                (0, 1, (0.7, 0.0, 0.0)),  # bottom - red
-                (1, 2, (0.7, 0.0, 0.0)),  # right - red
-                (2, 3, (0.0, 0.7, 0.0)),  # top (opening) - green
-                (3, 0, (0.7, 0.0, 0.0)),  # left - red
-            ]
-            for ei, ej, color in edges:
-                prim_path_edge = f"/World/envs/env_{i}/berth_edge_{ei}_{ej}"
-                self._draw_edge_segment(
-                    prim_path_edge,
-                    [base_corners[ei][0], base_corners[ei][1], 0.0],
-                    [base_corners[ej][0], base_corners[ej][1], 0.0],
-                    color=color,
-                    width=0.02,
-                )
-            
-            # [0] 左下角（深红色）- 后墙
-            VisualPin(
-                prim_path=f"/World/envs/env_{i}/berth_back_corner",
-                translation=[base_corners[0][0], base_corners[0][1], 0.0],
-                name="berth_back_corner",
-                ball_radius=0.05,  # 更小的球
-                poll_radius=0.005,  # 更细的杆
-                poll_length=0.3,  # 更短的杆
-                color=torch.tensor([0.7, 0, 0]),  # 深红色
-            )
-            
-            # [1] 右下角（深红色）- 右墙
-            VisualPin(
-                prim_path=f"/World/envs/env_{i}/berth_right_corner",
-                translation=[base_corners[1][0], base_corners[1][1], 0.0],
-                name="berth_right_corner",
-                ball_radius=0.05,  # 更小的球
-                poll_radius=0.005,  # 更细的杆
-                poll_length=0.3,  # 更短的杆
-                color=torch.tensor([0.7, 0, 0]),  # 深红色
-            )
-            
-            # [2] 右上角（绿色）- 开口
-            VisualPin(
-                prim_path=f"/World/envs/env_{i}/berth_front_corner",
-                translation=[base_corners[2][0], base_corners[2][1], 0.0],
-                name="berth_front_corner",
-                ball_radius=0.05,  # 更小的球
-                poll_radius=0.005,  # 更细的杆
-                poll_length=0.3,  # 更短的杆
-                color=torch.tensor([0, 0.7, 0]),  # 深绿色
-            )
-            
-            # [3] 左上角（深红色）- 左墙
-            VisualPin(
-                prim_path=f"/World/envs/env_{i}/berth_left_corner",
-                translation=[base_corners[3][0], base_corners[3][1], 0.0],
-                name="berth_left_corner",
-                ball_radius=0.05,  # 更小的球
-                poll_radius=0.005,  # 更细的杆
-                poll_length=0.3,  # 更短的杆
-                color=torch.tensor([0.7, 0, 0]),  # 深红色
+        # 只创建env_0的船位边界标记，Isaac Sim会自动克隆到其他环境
+        env_id = 0
+        
+        # 逐边绘制：0-1(底部，红)，1-2(右侧，红)，2-3(顶部开口，绿)，3-0(左侧，红）
+        edges = [
+            (0, 1, (0.7, 0.0, 0.0)),  # bottom - red
+            (1, 2, (0.7, 0.0, 0.0)),  # right - red
+            (2, 3, (0.0, 0.7, 0.0)),  # top (opening) - green
+            (3, 0, (0.7, 0.0, 0.0)),  # left - red
+        ]
+        
+        for ei, ej, color in edges:
+            prim_path_edge = f"/World/envs/env_{env_id}/berth_edge_{ei}_{ej}"
+            self._draw_edge_segment(
+                prim_path_edge,
+                [base_corners[ei][0], base_corners[ei][1], 0.0],
+                [base_corners[ej][0], base_corners[ej][1], 0.0],
+                color=color,
+                width=0.02,
             )
         
-        print(f"=== generate_berth 完成，为 {self._num_envs} 个环境创建了船位矩形 ===")
+        # 创建env_0的船位角点标记
+        # [0] 左下角（深红色）- 后墙
+        VisualPin(
+            prim_path=f"/World/envs/env_{env_id}/berth_back_corner",
+            translation=[base_corners[0][0], base_corners[0][1], 0.0],
+            name="berth_back_corner",
+            ball_radius=0.05,  # 更小的球
+            poll_radius=0.005,  # 更细的杆
+            poll_length=0.3,  # 更短的杆
+            color=torch.tensor([0.7, 0, 0]),  # 深红色
+        )
+        
+        # [1] 右下角（深红色）- 右墙
+        VisualPin(
+            prim_path=f"/World/envs/env_{env_id}/berth_right_corner",
+            translation=[base_corners[1][0], base_corners[1][1], 0.0],
+            name="berth_right_corner",
+            ball_radius=0.05,  # 更小的球
+            poll_radius=0.005,  # 更细的杆
+            poll_length=0.3,  # 更短的杆
+            color=torch.tensor([0.7, 0, 0]),  # 深红色
+        )
+        
+        # [2] 右上角（绿色）- 开口
+        VisualPin(
+            prim_path=f"/World/envs/env_{env_id}/berth_front_corner",
+            translation=[base_corners[2][0], base_corners[2][1], 0.0],
+            name="berth_front_corner",
+            ball_radius=0.05,  # 更小的球
+            poll_radius=0.005,  # 更细的杆
+            poll_length=0.3,  # 更短的杆
+            color=torch.tensor([0, 0.7, 0]),  # 深绿色
+        )
+        
+        # [3] 左上角（深红色）- 左墙
+        VisualPin(
+            prim_path=f"/World/envs/env_{env_id}/berth_left_corner",
+            translation=[base_corners[3][0], base_corners[3][1], 0.0],
+            name="berth_left_corner",
+            ball_radius=0.05,  # 更小的球
+            poll_radius=0.005,  # 更细的杆
+            poll_length=0.3,  # 更短的杆
+            color=torch.tensor([0.7, 0, 0]),  # 深红色
+        )
+        
+        # print(f"=== generate_berth 完成，只为env_0创建船位矩形，其他环境将自动克隆 ===")
 
     def _draw_edge_segment(self, prim_path: str, p0, p1, color=(0.7, 0.0, 0.0), width=0.02):
         """在 USD 场景中以 BasisCurves 绘制一条线段 p0->p1。"""
@@ -612,30 +678,30 @@ class BerthingTask(Core):
         try:
             berth_centers = XFormPrimView(prim_paths_expr="/World/envs/.*/berth_center")
             scene.add(berth_centers)
-            print(f"成功添加船位中心标记到场景")
+            # print(f"成功添加船位中心标记到场景")
         except Exception as e:
-            print(f"错误: 无法添加船位中心标记到场景: {e}")
+            # print(f"错误: 无法添加船位中心标记到场景: {e}")
             berth_centers = None
         
         # 添加船位边界标记（边线和角点）
         try:
             berth_corners = XFormPrimView(prim_paths_expr="/World/envs/.*/berth_.*_corner", name="berth_corners_view")
             scene.add(berth_corners)
-            print(f"成功添加船位角点标记到场景")
+            # print(f"成功添加船位角点标记到场景")
         except Exception as e:
-            print(f"警告: 无法添加船位角点标记到场景: {e}")
+            # print(f"警告: 无法添加船位角点标记到场景: {e}")
             berth_corners = None
         
         # 添加船位边线标记
         try:
             berth_edges = XFormPrimView(prim_paths_expr="/World/envs/.*/berth_edge_.*", name="berth_edges_view")
             scene.add(berth_edges)
-            print(f"成功添加船位边线标记到场景")
+            # print(f"成功添加船位边线标记到场景")
         except Exception as e:
-            print(f"警告: 无法添加船位边线标记到场景: {e}")
+            # print(f"警告: 无法添加船位边线标记到场景: {e}")
             berth_edges = None
         
-        print(f"=== add_visual_marker_to_scene 完成 ===")
+        # print(f"=== add_visual_marker_to_scene 完成 ===")
         return scene, berth_centers
 
 

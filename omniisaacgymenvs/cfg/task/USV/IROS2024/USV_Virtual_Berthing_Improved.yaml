@@ -1,14 +1,17 @@
+# 改进版自动泊船任务配置文件
+# 专门针对：1.船能从绿边进入船位而不与红边触碰 2.能够快速进入船位，并保持船体姿态
+
 # used to create the object
 name: USVVirtual
 
 physics_engine: ${..physics_engine}
-experiment: USV_Virtual_Berthing-V1
+experiment: USV_Virtual_Berthing_Improved-V1
 
 # if given, will override the device setting in gym. 
 env:
   numEnvs: ${resolve_default:512,${...num_envs}}
   envSpacing: 10
-  maxEpisodeLength: 5000
+  maxEpisodeLength: 2000  # 减少最大步数，鼓励快速完成
   enableDebugVis: False
   action_mode: Continuous
   numQuantizedActions: 1
@@ -30,7 +33,7 @@ env:
   water_current:
     use_water_current: True
     randomize_water_current: True
-    flow_velocity: [1.0, 0, 1.0] # x, y, z
+    flow_velocity: [0.5, 0, 0.5] # 减少水流干扰，便于精确控制
 
   disturbances:
     forces:
@@ -39,11 +42,11 @@ env:
       use_constant_force: True
       use_sinusoidal_force: True
       force_const_min: 0.0 
-      force_const_max: 2.5
+      force_const_max: 1.5  # 减少力干扰
       force_sin_min: 0.0
-      force_sin_max: 2.5
+      force_sin_max: 1.5
       force_min_freq: 0.25
-      force_max_freq: 3.0
+      force_max_freq: 2.0
       force_min_shift: 0.0
       force_max_shift: 100.0
 
@@ -53,37 +56,37 @@ env:
       use_constant_torque: True
       use_sinusoidal_torque: True
       torque_const_min: 0.0
-      torque_const_max: 1.0
+      torque_const_max: 0.5  # 减少扭矩干扰
       torque_sin_min: 0.0
-      torque_sin_max: 1.0
+      torque_sin_max: 0.5
       torque_min_freq: 0.25
-      torque_max_freq: 3
+      torque_max_freq: 2.0
       torque_min_shift: 0.0
       torque_max_shift: 100.0
 
     observations:
       # Add noisy observations
       add_noise_on_pos: True
-      position_noise_min: -0.03 # default - 0.03 m
-      position_noise_max:  0.03 # default - 0.03 m
+      position_noise_min: -0.02 # 减少位置噪声
+      position_noise_max:  0.02
       add_noise_on_vel: True
-      velocity_noise_min: -0.03 # default - 0.03 m/s
-      velocity_noise_max:  0.03 # default - 0.03 m/s
+      velocity_noise_min: -0.02 # 减少速度噪声
+      velocity_noise_max:  0.02
       add_noise_on_heading: True
-      heading_noise_min: -0.025 # default - 0.025 rad
-      heading_noise_max:  0.025 # default - 0.025 rad
+      heading_noise_min: -0.015 # 减少航向噪声
+      heading_noise_max:  0.015
 
     actions:
       # Add noisy actions
       add_noise_on_act: True
-      min_action_noise: -0.05
-      max_action_noise:  0.05
+      min_action_noise: -0.03  # 减少动作噪声
+      max_action_noise:  0.03
 
     mass:
       # Add mass randomization
       add_mass_disturbances: True
-      min_mass: 34.96
-      max_mass: 36.96
+      min_mass: 35.0  # 减少质量变化
+      max_mass: 37.0
       CoM_max_displacement: 0.0
       base_mass: 35.96
 
@@ -91,119 +94,117 @@ env:
       # Add drag disturbances
       use_drag_randomization: True
       # Proportion of drag randomization for each drag coefficient
-      # If it is 0.1 it means 0.9 to 1.1
-      # Linear
-      u_linear_rand: 0.1 # Forward
-      v_linear_rand: 0.1 # Lateral
-      w_linear_rand: 0.0 # Vertical. In 2D, neglectable
-      p_linear_rand: 0.0 # Roll. In 2D, neglectable
-      q_linear_rand: 0.0 # Pitch. In 2D, neglectable
-      r_linear_rand: 0.1 # Yaw
+      u_linear_rand: 0.05  # 减少阻力变化
+      v_linear_rand: 0.05
+      w_linear_rand: 0.0
+      p_linear_rand: 0.0
+      q_linear_rand: 0.0
+      r_linear_rand: 0.05
       # Quadratic
-      u_quad_rand: 0.1 # Forward
-      v_quad_rand: 0.1 # Lateral
-      w_quad_rand: 0.0 # Vertical. In 2D, neglectable
-      p_quad_rand: 0.0 # Roll. In 2D, neglectable
-      q_quad_rand: 0.0 # Pitch. In 2D, neglectable
-      r_quad_rand: 0.1 # Yaw
+      u_quad_rand: 0.05
+      v_quad_rand: 0.05
+      w_quad_rand: 0.0
+      p_quad_rand: 0.0
+      q_quad_rand: 0.0
+      r_quad_rand: 0.05
     
     thruster:
       # Add thruster disturbances
       use_thruster_randomization: False
-      thruster_rand: 0.0 # If it is 0.2 it means 0.8 to 1.2
+      thruster_rand: 0.0
       use_separate_randomization: False
-      left_rand: 0.0 # If it is 0.2 it means 0.8 to 1.2
-      right_rand: 0.0 # If it is 0.2 it means 0.8 to 1.2
+      left_rand: 0.0
+      right_rand: 0.0
 
   task_parameters: 
     name: Berthing
-    # 泊船任务参数
+    # 泊船任务参数 - 优化尺寸
     berth_center: [0.0, 0.0]  # 船位中心
-    berth_width: 3.0  # 船位宽度（适中）
-    berth_length: 4.5  # 船位长度（适中）
-    collision_radius: 0.6  # 碰撞检测半径
-    position_tolerance: 0.15  # 位置容差（更严格）
-    heading_tolerance: 0.08  # 航向容差（更严格）
-    kill_after_n_steps_in_tolerance: 100  # 在容差内停留步数（更严格）
-    goal_reward: 1000.0  # 成功奖励
-    time_reward: -0.1  # 时间惩罚
-    time_limit: 1000  # 时间限制
+    berth_width: 2.5  # 船位宽度（适中，便于精确控制）
+    berth_length: 3.5  # 船位长度（适中，便于精确控制）
+    collision_radius: 0.5  # 碰撞检测半径
+    position_tolerance: 0.12  # 位置容差（更严格，要求精确）
+    heading_tolerance: 0.06  # 航向容差（更严格，要求精确）
+    kill_after_n_steps_in_tolerance: 80  # 在容差内停留步数
+    goal_reward: 1500.0  # 成功奖励（提高）
+    time_reward: -0.05  # 时间惩罚（减少，鼓励快速）
+    time_limit: 2000  # 时间限制
     
     # 方向引导参数
-    entry_direction_weight: 1.5  # 进入方向权重
-    entry_angle_tolerance: 0.3  # 进入角度容差（弧度）
-    preferred_entry_distance: 2.0  # 首选进入距离
+    entry_direction_weight: 2.0  # 进入方向权重（提高）
+    entry_angle_tolerance: 0.25  # 进入角度容差（更严格）
+    preferred_entry_distance: 1.5  # 首选进入距离
     
     # 姿态稳定性参数
-    max_linear_velocity: 3.0  # 最大线速度
-    max_angular_velocity: 1.0  # 最大角速度
-    stability_threshold: 0.5  # 稳定性阈值
+    max_linear_velocity: 2.5  # 最大线速度（降低，提高稳定性）
+    max_angular_velocity: 0.8  # 最大角速度（降低，提高稳定性）
+    stability_threshold: 0.4  # 稳定性阈值（更严格）
     
-    # 生成参数
-    spawn_radius_min: 3.0  # 最小生成半径
-    spawn_radius_max: 7.0  # 最大生成半径
-    spawn_angle_range: 90.0  # 生成角度范围（度）- 限制在开口方向
-    kill_dist: 20.0  # 终止距离
+    # 生成参数 - 优化生成策略
+    spawn_radius_min: 2.5  # 最小生成半径（减少，便于快速进入）
+    spawn_radius_max: 6.0  # 最大生成半径（减少，便于快速进入）
+    spawn_angle_range: 60.0  # 生成角度范围（更窄，更精确的方向引导）
+    kill_dist: 15.0  # 终止距离
     
     # 课程学习参数
     spawn_curriculum: True  # 启用课程学习
-    spawn_curriculum_max_dist: 5.0
-    spawn_curriculum_min_dist: 4.0
-    spawn_curriculum_kill_dist: 15.0
+    spawn_curriculum_max_dist: 4.0
+    spawn_curriculum_min_dist: 3.0
+    spawn_curriculum_kill_dist: 12.0
     spawn_curriculum_mode: "linear"
     spawn_curriculum_warmup: 0
-    spawn_curriculum_end: 1000
+    spawn_curriculum_end: 800
 
   reward_parameters:
     name: Berthing
-    # 泊船奖励参数
-    position_scale: 25.0  # 位置奖励权重（提高）
-    heading_scale: 15.0  # 航向奖励权重（提高）
-    velocity_penalty_scale: 2.0  # 速度惩罚权重
-    angular_velocity_penalty_scale: 3.0  # 角速度惩罚权重（提高）
+    # 泊船奖励参数 - 优化权重
+    position_scale: 30.0  # 位置奖励权重（提高）
+    heading_scale: 20.0  # 航向奖励权重（提高）
+    velocity_penalty_scale: 3.0  # 速度惩罚权重（提高）
+    angular_velocity_penalty_scale: 4.0  # 角速度惩罚权重（提高）
     
     # 方向引导奖励
-    entry_direction_reward: 10.0  # 从正确方向进入的奖励
-    entry_angle_tolerance: 0.3  # 进入角度容差（弧度）
+    entry_direction_reward: 15.0  # 从正确方向进入的奖励（提高）
+    entry_angle_tolerance: 0.25  # 进入角度容差（更严格）
     
     # 碰撞检测和惩罚
-    wall_collision_penalty: -100.0  # 红边（墙壁）碰撞惩罚（重罚）
-    opening_collision_penalty: -20.0  # 绿边（开口）碰撞惩罚（轻罚）
-    collision_radius: 0.6  # 碰撞检测半径
+    wall_collision_penalty: -150.0  # 红边（墙壁）碰撞惩罚（重罚）
+    opening_collision_penalty: -30.0  # 绿边（开口）碰撞惩罚（轻罚）
+    collision_radius: 0.5  # 碰撞检测半径
     
     # 成功检测
-    success_reward: 200.0  # 成功奖励
-    position_tolerance: 0.15  # 位置容差
-    heading_tolerance: 0.08  # 航向容差
+    success_reward: 300.0  # 成功奖励（提高）
+    position_tolerance: 0.12  # 位置容差
+    heading_tolerance: 0.06  # 航向容差
     
     # 时间控制
-    time_penalty_scale: 0.05  # 时间惩罚权重
+    time_penalty_scale: 0.03  # 时间惩罚权重（减少，鼓励快速）
     
-    # 渐进式奖励参数
-    distance_thresholds: [3.0, 2.0, 1.0, 0.5]  # 距离阈值列表
-    reward_multipliers: [0.5, 1.0, 1.5, 2.0]  # 对应奖励倍数
+    # 渐进式奖励参数 - 优化阶段
+    distance_thresholds: [2.5, 1.5, 1.0, 0.5]  # 距离阈值列表（更精细）
+    reward_multipliers: [0.3, 1.0, 1.8, 2.5]  # 对应奖励倍数（更激进）
 
   penalties_parameters:
     penalize_energy: True
-    penalize_energy_fn: "lambda x,step : (torch.exp(-torch.sum(x**2, dim=-1)) - 1.0) * 0.01" 
-    penalize_energy_c1: 0.00 # Not used in this version
-    penalize_energy_c2: 0.00 # Not used in this version
+    penalize_energy_fn: "lambda x,step : (torch.exp(-torch.sum(x**2, dim=-1)) - 1.0) * 0.02" 
+    penalize_energy_c1: 0.00
+    penalize_energy_c2: 0.00
     penalize_linear_velocities: True
-    penalize_linear_velocities_fn: "lambda x,step: torch.where(torch.norm(x, dim=-1)>7.0, -torch.norm(x, dim=-1)*0.1, torch.zeros_like(torch.norm(x, dim=-1)))"
-    penalize_linear_velocities_c1: 0.00 # Not used in this version
-    penalize_linear_velocities_c2: 0.00 # Not used in this version
-    penalize_angular_velocities: False
-    penalize_angular_velocities_fn: "lambda x,step : -torch.abs(x)*0.01 + 0.0"
-    penalize_angular_velocities_c1: 0.01 # Not used in this version
-    penalize_angular_velocities_c2: 0.00 # Not used in this version
+    penalize_linear_velocities_fn: "lambda x,step: torch.where(torch.norm(x, dim=-1)>5.0, -torch.norm(x, dim=-1)*0.15, torch.zeros_like(torch.norm(x, dim=-1)))"
+    penalize_linear_velocities_c1: 0.00
+    penalize_linear_velocities_c2: 0.00
+    penalize_angular_velocities: True  # 启用角速度惩罚
+    penalize_angular_velocities_fn: "lambda x,step : -torch.abs(x)*0.02 + 0.0"
+    penalize_angular_velocities_c1: 0.02
+    penalize_angular_velocities_c2: 0.00
     penalize_angular_velocities_variation: True
-    penalize_angular_velocities_variation_fn: "lambda x,step: (torch.exp(-0.033 * torch.abs(x)) - 1.0) * 1.0"
-    penalize_angular_velocities_variation_c1: 0.00 # Not used in this version
-    penalize_angular_velocities_variation_c2: 0.00 # Not used in this version
-    penalize_action_variation: False
-    penalize_action_variation_fn: "lambda x,step: (torch.exp(-0.033 * torch.abs(x)) - 1.0) * 0.01"
-    penalize_action_variation_c1: 0.00 # Not used in this version
-    penalize_action_variation_c2: 0.00 # Not used in this version
+    penalize_angular_velocities_variation_fn: "lambda x,step: (torch.exp(-0.05 * torch.abs(x)) - 1.0) * 1.5"
+    penalize_angular_velocities_variation_c1: 0.00
+    penalize_angular_velocities_variation_c2: 0.00
+    penalize_action_variation: True  # 启用动作变化惩罚
+    penalize_action_variation_fn: "lambda x,step: (torch.exp(-0.05 * torch.abs(x)) - 1.0) * 0.02"
+    penalize_action_variation_c1: 0.00
+    penalize_action_variation_c2: 0.00
 
   platform:
     randomization:
@@ -338,39 +339,52 @@ dynamics:
 
 task:
   BerthingParameters:
-    # 泊船位参数
-    berth_width: 4.0  # 船位宽度
-    berth_length: 6.0  # 船位长度
+    # 泊船位参数 - 与env.task_parameters保持一致
+    berth_width: 2.5  # 船位宽度
+    berth_length: 3.5  # 船位长度
     goal_random_position: 0  # 船位中心随机范围（相对于网格点）
     
     # 碰撞检测参数
     collision_radius: 0.5  # 船体安全半径
-    wall_distance_threshold: 0.8  # 墙距离阈值
+    wall_distance_threshold: 1.0  # 墙距离阈值
+    opening_distance_threshold: 0.8  # 开口距离阈值
     
     # 成功条件
-    position_tolerance: 0.2  # 位置容差
-    heading_tolerance: 0.1  # 航向容差
-    time_limit: 1000  # 时间限制
+    position_tolerance: 0.12  # 位置容差（更严格）
+    heading_tolerance: 0.06  # 航向容差（更严格）
+    time_limit: 2000  # 时间限制
     
     # 生成参数
-    spawn_radius_min: 3.0  # 最小生成半径
-    spawn_radius_max: 8.0  # 最大生成半径
-    spawn_angle_range: 180  # 生成角度范围（度）
+    spawn_radius_min: 2.5  # 最小生成半径
+    spawn_radius_max: 6.0  # 最大生成半径
+    spawn_angle_range: 60  # 生成角度范围（度）
     
     # 终止条件
-    kill_after_n_steps_in_tolerance: 50  # 成功后在容差内停留步数
+    kill_after_n_steps_in_tolerance: 80  # 成功后在容差内停留步数
     kill_dist: 15.0  # 杀死距离
-    boundary_cost: 50.0  # 边界惩罚
-    goal_reward: 1000.0  # 成功奖励
-    time_reward: -0.1  # 时间惩罚
+    boundary_cost: 150.0  # 边界惩罚（更严格）
+    goal_reward: 1500.0  # 成功奖励
+    time_reward: -0.05  # 时间惩罚
+    
+    # 方向引导参数
+    entry_direction_weight: 2.0  # 进入方向权重
+    entry_angle_tolerance: 0.25  # 进入角度容差（弧度）
+    preferred_entry_distance: 1.5  # 首选进入距离
+    
+    # 姿态稳定性参数
+    max_linear_velocity: 2.5  # 最大线速度
+    max_angular_velocity: 0.8  # 最大角速度
+    stability_threshold: 0.4  # 稳定性阈值
     
     # 课程学习参数
-    spawn_curriculum: False
-    spawn_curriculum_min_dist: 2.0
-    spawn_curriculum_max_dist: 5.0
-    spawn_curriculum_kill_dist: 20.0
+    spawn_curriculum: True
+    spawn_curriculum_min_dist: 3.0
+    spawn_curriculum_max_dist: 4.0
+    spawn_curriculum_kill_dist: 12.0
     spawn_curriculum_mode: "linear"
-    spawn_curriculum_warmup: 250
-    spawn_curriculum_end: 1000
-
-
+    spawn_curriculum_warmup: 0
+    spawn_curriculum_end: 800
+    
+    # 渐进式任务参数
+    distance_stages: [2.5, 1.5, 1.0, 0.5]  # 距离阶段列表
+    difficulty_multipliers: [0.3, 1.0, 1.8, 2.5]  # 对应难度倍数

@@ -76,33 +76,33 @@ class BerthingTask(Core):
         self.collision_detected = torch.zeros(self._num_envs, device=self._device, dtype=torch.bool)
         self._position_error = torch.zeros(self._num_envs, 2, device=self._device, dtype=torch.float32)
 
-    def _calculate_berth_corners(self, env_ids=None):
-        """计算船位四个角点（逆时针）
-        船位布局：
-        [3] 左上角 -------- [2] 右上角 (开口)
-         |                    |
-         |                    |
-        [0] 左下角 -------- [1] 右下角
+    def _calculate_berth_corners(self, env_ids: torch.Tensor = None):
         """
+        优化的船位角点计算方法，使用向量化操作提高性能。
+        计算矩形泊船位的四个角点坐标。
+        """
+        
+        # 基础角点（相对于原点）
         half_width = self._task_parameters.berth_width / 2
         half_length = self._task_parameters.berth_length / 2
         
-        # 四个角点（逆时针，从左下开始）
+        # 预计算基础角点，避免重复计算
         base_corners = torch.tensor([
             [-half_width, -half_length],  # [0] 左下角
-            [half_width, -half_length],   # [1] 右下角
-            [half_width, half_length],    # [2] 右上角 (开口)
-            [-half_width, half_length]    # [3] 左上角
+            [ half_width, -half_length],  # [1] 右下角
+            [ half_width,  half_length],  # [2] 右上角
+            [-half_width,  half_length],  # [3] 左上角
         ], device=self._device, dtype=torch.float32)
         
         if env_ids is None:
-            # 为所有环境计算
-            for i in range(self._num_envs):
-                self._berth_corners[i] = base_corners + self._berth_centers[i]
+            # 为所有环境计算 - 向量化操作
+            # 使用广播机制一次性计算所有环境
+            # [num_envs, 1, 2] + [1, 4, 2] = [num_envs, 4, 2]
+            self._berth_corners = self._berth_centers.unsqueeze(1) + base_corners.unsqueeze(0)
         else:
-            # 只为指定环境计算
-            for env_id in env_ids:
-                self._berth_corners[env_id] = base_corners + self._berth_centers[env_id]
+            # 只为指定环境计算 - 向量化操作
+            # [len(env_ids), 1, 2] + [1, 4, 2] = [len(env_ids), 4, 2]
+            self._berth_corners[env_ids] = self._berth_centers[env_ids].unsqueeze(1) + base_corners.unsqueeze(0)
 
     def create_stats(self, stats: dict) -> dict:
         """
@@ -128,57 +128,105 @@ class BerthingTask(Core):
         self, current_state: dict, observation_frame: str
     ) -> torch.Tensor:
         """
-        Computes the observation tensor from the current state of the robot."""
+        优化的状态观察计算，减少重复计算，提高性能。
+        """
 
-        # 计算到船位中心的距离
+        # 1. 计算位置误差 - 向量化操作
         self._position_error = self._berth_centers - current_state["position"][:, :2]
         
-        # 计算航向误差
+        # 2. 计算航向误差 - 向量化操作
+        # 当前航向
         theta = torch.atan2(
             current_state["orientation"][:, 1], current_state["orientation"][:, 0]
         )
-        # 计算目标航向（朝向船位中心）
+        
+        # 目标航向（朝向船位中心）
         beta = torch.atan2(self._position_error[:, 1], self._position_error[:, 0])
-        # 计算航向误差
+        
+        # 航向误差（归一化到[-π, π]）
         alpha = torch.fmod(beta - theta + math.pi, 2 * math.pi) - math.pi
         self.heading_error = torch.abs(alpha)
         
-        # 更新任务数据
+        # 3. 更新任务数据 - 向量化操作
         self._task_data[:, 0] = torch.cos(alpha)
         self._task_data[:, 1] = torch.sin(alpha)
-        self._task_data[:, 2] = torch.norm(self._position_error, dim=1)
+        self._task_data[:, 2] = torch.linalg.norm(self._position_error, dim=1)
         
-        # 检查碰撞
+        # 4. 检查碰撞 - 向量化碰撞检测
         self.collision_detected = self._check_collision(
-            current_state["position"][:, :2]
+            torch.arange(self._num_envs, device=self._device)
         )
         
+        # 5. 返回观察张量
         return self.update_observation_tensor(current_state, observation_frame)
 
-    def _check_collision(self, usv_position):
-        """检查USV与船位的碰撞"""
-        collision = torch.zeros(self._num_envs, device=self._device, dtype=torch.bool)
+    def _check_collision(self, env_ids: torch.Tensor) -> torch.Tensor:
+        """
+        优化的碰撞检测方法，使用向量化操作提高性能。
+        检查USV是否与船位边界发生碰撞。
+        """
         
-        # 为每个环境检查碰撞
-        for env_id in range(self._num_envs):
-            # 检查与每条边的距离
-            for i in range(4):
-                wall_start = self._berth_corners[env_id, i]
-                wall_end = self._berth_corners[env_id, (i + 1) % 4]
-                
-                # 计算到墙的距离
-                wall_distance = self._point_to_line_distance(
-                    usv_position[env_id:env_id+1], 
-                    wall_start.unsqueeze(0), 
-                    wall_end.unsqueeze(0)
-                )
-                
-                # 如果距离小于碰撞半径，判定为碰撞
-                if wall_distance < self._task_parameters.collision_radius:
-                    collision[env_id] = True
-                    break
+        if len(env_ids) == 0:
+            return torch.tensor([], device=self._device, dtype=torch.bool)
         
-        return collision
+        # 获取需要检查的环境的船位角点
+        berth_corners = self._berth_corners[env_ids]  # [num_resets, 4, 2]
+        usv_positions = self._position_error[env_ids, :2]  # [num_resets, 2]
+        
+        # 向量化计算所有边界的距离
+        # 计算所有边的起点和终点
+        wall_starts = berth_corners  # [num_resets, 4, 2]
+        wall_ends = torch.roll(berth_corners, shifts=1, dims=1)  # [num_resets, 4, 2]
+        
+        # 向量化计算到所有边的距离
+        distances = self._point_to_line_distance_vectorized(
+            usv_positions.unsqueeze(1).expand(-1, 4, -1),  # [num_resets, 4, 2]
+            wall_starts,  # [num_resets, 4, 2]
+            wall_ends     # [num_resets, 4, 2]
+        )  # [num_resets, 4]
+        
+        # 找到每个环境的最小距离（最接近的边）
+        min_distances = torch.min(distances, dim=1)[0]  # [num_resets]
+        
+        # 检查是否发生碰撞（距离小于碰撞半径）
+        collision_radius = getattr(self._task_parameters, 'collision_radius', 0.5)
+        collisions = min_distances < collision_radius
+        
+        # 更新碰撞状态
+        self.collision_detected[env_ids] = collisions
+        
+        return collisions
+    
+    def _point_to_line_distance_vectorized(self, points, line_starts, line_ends):
+        """
+        向量化计算点到线段的距离，避免循环。
+        points: [num_envs, num_lines, 2]
+        line_starts: [num_envs, num_lines, 2]
+        line_ends: [num_envs, num_lines, 2]
+        返回: [num_envs, num_lines]
+        """
+        # 计算线段向量
+        line_vecs = line_ends - line_starts  # [num_envs, num_lines, 2]
+        
+        # 计算点到起点的向量
+        point_vecs = points - line_starts  # [num_envs, num_lines, 2]
+        
+        # 计算线段长度（避免除零）
+        line_lengths = torch.linalg.norm(line_vecs, dim=-1)  # [num_envs, num_lines]
+        line_lengths = torch.clamp(line_lengths, min=1e-6)
+        
+        # 计算投影参数 t
+        dot_products = torch.sum(point_vecs * line_vecs, dim=-1)  # [num_envs, num_lines]
+        t_values = dot_products / (line_lengths ** 2)  # [num_envs, num_lines]
+        t_values = torch.clamp(t_values, 0, 1)
+        
+        # 计算最近点
+        closest_points = line_starts + t_values.unsqueeze(-1) * line_vecs  # [num_envs, num_lines, 2]
+        
+        # 计算距离
+        distances = torch.linalg.norm(points - closest_points, dim=-1)  # [num_envs, num_lines]
+        
+        return distances
 
     def _generate_berth_centers(self, env_ids):
         """为指定环境生成船位中心"""
@@ -187,31 +235,19 @@ class BerthingTask(Core):
         print(f"_generate_berth_centers: 此方法已废弃，船位中心在get_goals中生成")
         pass
 
-    def _point_to_line_distance(self, point, line_start, line_end):
-        """计算点到线段的距离"""
-        line_vec = line_end - line_start
-        point_vec = point - line_start
-        
-        line_length = torch.norm(line_vec, dim=-1)
-        line_length = torch.clamp(line_length, min=1e-6)  # 避免除零
-        
-        # 计算投影参数
-        t = torch.sum(point_vec * line_vec, dim=-1) / (line_length ** 2)
-        t = torch.clamp(t, 0, 1)
-        
-        # 最近点
-        closest_point = line_start + t.unsqueeze(-1) * line_vec
-        
-        return torch.norm(point - closest_point, dim=-1)
+
 
     def compute_reward(
         self, current_state: torch.Tensor, actions: torch.Tensor
     ) -> torch.Tensor:
         """
-        Computes the reward for the current state of the robot."""
+        优化的奖励计算函数，减少重复计算，提高性能。
+        """
 
-        # 计算奖励
-        self.position_dist = torch.sqrt(torch.square(self._position_error).sum(-1))
+        # 1. 计算位置距离 - 使用更高效的范数计算
+        self.position_dist = torch.linalg.norm(self._position_error, dim=-1)
+        
+        # 2. 计算组合奖励 - 一次性调用
         self.combined_reward = self._reward_parameters.compute_reward(
             current_state,
             actions,
@@ -221,27 +257,35 @@ class BerthingTask(Core):
             self._task_parameters.collision_radius,
         )
 
-        # 重置时奖励为0
-        self.combined_reward[self.just_had_been_reset] = 0
-        self.just_had_been_reset = torch.tensor(
-            [], device=self._device, dtype=torch.long
-        )
+        # 3. 重置时奖励为0 - 向量化操作
+        if len(self.just_had_been_reset) > 0:
+            self.combined_reward[self.just_had_been_reset] = 0
+            self.just_had_been_reset = torch.tensor(
+                [], device=self._device, dtype=torch.long
+            )
 
-        # 检查是否成功
+        # 4. 检查成功状态 - 向量化计算
         success = self._check_success()
         goal_reward = success * self._task_parameters.goal_reward
         
-        # 时间惩罚
+        # 5. 时间惩罚 - 预计算
         time_reward = self._task_parameters.time_reward
 
+        # 6. 返回总奖励 - 一次性计算
         return self.combined_reward + goal_reward + time_reward
 
     def _check_success(self):
-        """检查是否成功泊船"""
+        """
+        向量化检查是否成功泊船，避免循环。
+        """
+        # 向量化比较操作
         position_success = self.position_dist < self._task_parameters.position_tolerance
         heading_success = self.heading_error < self._task_parameters.heading_tolerance
+        
+        # 向量化逻辑与操作
         success = position_success & heading_success
         
+        # 转换为浮点数
         return success.float()
 
     def update_statistics(self, stats: dict) -> dict:

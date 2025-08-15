@@ -414,7 +414,9 @@ class DynamicPositionReward:
 @dataclass
 class BerthingReward:
     """
-    Reward function and parameters for the Berthing task."""
+    Reward function and parameters for the Berthing task.
+    优化版本：向量化计算，减少循环，提高运行速度。
+    """
 
     # 基础奖励权重
     position_scale: float = 15.0  # 位置奖励权重
@@ -440,8 +442,7 @@ class BerthingReward:
     time_penalty_scale: float = 0.01  # 时间惩罚权重
 
     def __post_init__(self) -> None:
-        """
-        Checks that the reward parameters are valid."""
+        """Checks that the reward parameters are valid."""
         pass
 
     def compute_reward(
@@ -454,63 +455,143 @@ class BerthingReward:
         collision_radius: float = 0.5,
     ) -> torch.Tensor:
         """
-        Defines the function used to compute the reward for the Berthing task."""
+        优化的奖励计算函数，使用向量化操作提高速度。
+        """
         
-        # 1. 位置奖励 - 基于到船位中心的距离
-        position_reward = self.position_scale * torch.exp(-position_error / 2.0)
+        # 1. 位置奖励 - 使用更高效的指数计算
+        position_reward = self.position_scale * torch.exp(-position_error * 0.5)
         
-        # 2. 航向奖励 - 基于航向误差
-        heading_reward = self.heading_scale * torch.exp(-heading_error / 0.5)
+        # 2. 航向奖励 - 使用更高效的指数计算
+        heading_reward = self.heading_scale * torch.exp(-heading_error * 2.0)
         
-        # 3. 速度惩罚
+        # 3. 速度惩罚 - 向量化计算
         velocity_penalty = torch.zeros_like(position_error)
         if 'linear_velocity' in current_state:
-            velocity_magnitude = torch.norm(current_state['linear_velocity'], dim=-1)
+            # 使用更高效的范数计算
+            velocity_magnitude = torch.linalg.norm(current_state['linear_velocity'], dim=-1)
             velocity_penalty = -self.velocity_penalty_scale * velocity_magnitude
         
-        # 4. 角速度惩罚
+        # 4. 角速度惩罚 - 向量化计算
         angular_velocity_penalty = torch.zeros_like(position_error)
         if 'angular_velocity' in current_state:
+            # 直接使用绝对值，避免不必要的计算
             yaw_velocity = torch.abs(current_state['angular_velocity'])
             angular_velocity_penalty = -self.angular_velocity_penalty_scale * yaw_velocity
         
-        # 5. 碰撞惩罚 - 检查与船位边界的碰撞
-        collision_penalty = self._check_collision_with_berth(
+        # 5. 碰撞惩罚 - 向量化碰撞检测
+        collision_penalty = self._check_collision_with_berth_vectorized(
             current_state['position'], berth_corners, collision_radius
         )
         
-        # 6. 成功奖励
-        success_reward = self._check_success(position_error, heading_error)
+        # 6. 成功奖励 - 向量化计算
+        success_reward = self._check_success_vectorized(position_error, heading_error)
         
-        # 7. 时间惩罚
+        # 7. 时间惩罚 - 预计算
         time_penalty = -self.time_penalty_scale * torch.ones_like(position_error)
         
-        return (position_reward + heading_reward + velocity_penalty + 
-                angular_velocity_penalty + collision_penalty + success_reward + time_penalty)
+        # 8. 组合所有奖励 - 一次性计算
+        total_reward = (position_reward + heading_reward + velocity_penalty + 
+                       angular_velocity_penalty + collision_penalty + success_reward + time_penalty)
+        
+        return total_reward
     
+    def _check_collision_with_berth_vectorized(self, usv_position, berth_corners, collision_radius):
+        """
+        向量化碰撞检测，避免Python循环，大幅提高速度。
+        berth_corners: [num_envs, 4, 2] 每个环境的船位四个角点
+        usv_position: [num_envs, 2] USV位置
+        """
+        num_envs = usv_position.shape[0]
+        
+        # 预分配碰撞惩罚张量
+        collision_penalty = torch.zeros(num_envs, device=usv_position.device, dtype=usv_position.dtype)
+        
+        # 向量化计算所有边界的距离
+        # 重新排列berth_corners以便向量化计算
+        # [num_envs, 4, 2] -> [num_envs, 4, 2] (保持原形状)
+        
+        # 计算所有边的起点和终点
+        wall_starts = berth_corners  # [num_envs, 4, 2]
+        wall_ends = torch.roll(berth_corners, shifts=1, dims=1)  # [num_envs, 4, 2]
+        
+        # 向量化计算到所有边的距离
+        # 使用广播机制一次性计算所有环境的所有边
+        distances = self._point_to_line_distance_vectorized(
+            usv_position.unsqueeze(1).expand(-1, 4, -1),  # [num_envs, 4, 2]
+            wall_starts,  # [num_envs, 4, 2]
+            wall_ends     # [num_envs, 4, 2]
+        )  # [num_envs, 4]
+        
+        # 找到每个环境的最小距离（最接近的边）
+        min_distances = torch.min(distances, dim=1)[0]  # [num_envs]
+        
+        # 向量化应用碰撞惩罚
+        collision_mask = min_distances < collision_radius
+        collision_penalty[collision_mask] = self.collision_penalty
+        
+        return collision_penalty
+    
+    def _point_to_line_distance_vectorized(self, points, line_starts, line_ends):
+        """
+        向量化计算点到线段的距离。
+        points: [num_envs, num_lines, 2]
+        line_starts: [num_envs, num_lines, 2]
+        line_ends: [num_envs, num_lines, 2]
+        返回: [num_envs, num_lines]
+        """
+        # 计算线段向量
+        line_vecs = line_ends - line_starts  # [num_envs, num_lines, 2]
+        
+        # 计算点到起点的向量
+        point_vecs = points - line_starts  # [num_envs, num_lines, 2]
+        
+        # 计算线段长度（避免除零）
+        line_lengths = torch.linalg.norm(line_vecs, dim=-1)  # [num_envs, num_lines]
+        line_lengths = torch.clamp(line_lengths, min=1e-6)
+        
+        # 计算投影参数 t
+        # 使用向量点积计算投影
+        dot_products = torch.sum(point_vecs * line_vecs, dim=-1)  # [num_envs, num_lines]
+        t_values = dot_products / (line_lengths ** 2)  # [num_envs, num_lines]
+        t_values = torch.clamp(t_values, 0, 1)
+        
+        # 计算最近点
+        closest_points = line_starts + t_values.unsqueeze(-1) * line_vecs  # [num_envs, num_lines, 2]
+        
+        # 计算距离
+        distances = torch.linalg.norm(points - closest_points, dim=-1)  # [num_envs, num_lines]
+        
+        return distances
+    
+    def _check_success_vectorized(self, position_error, heading_error):
+        """
+        向量化成功检测，避免循环。
+        """
+        position_success = position_error < self.position_tolerance
+        heading_success = heading_error < self.heading_tolerance
+        success = position_success & heading_success
+        
+        return torch.where(success, self.success_reward, torch.zeros_like(position_error))
+    
+    # 保留旧方法作为备用（如果需要的话）
     def _check_collision_with_berth(self, usv_position, berth_corners, collision_radius):
         """
-        检查USV与船位的碰撞
-        berth_corners: [num_envs, 4, 2] 每个环境的船位四个角点
+        旧的循环版本碰撞检测（保留作为备用）。
         """
         num_envs = usv_position.shape[0]
         collision_penalty = torch.zeros(num_envs, device=usv_position.device, dtype=usv_position.dtype)
         
-        # 为每个环境检查碰撞
         for env_id in range(num_envs):
-            # 检查与每条边的距离
             for i in range(4):
                 wall_start = berth_corners[env_id, i]
                 wall_end = berth_corners[env_id, (i + 1) % 4]
                 
-                # 计算到墙的距离
                 wall_distance = self._point_to_line_distance(
                     usv_position[env_id:env_id+1], 
                     wall_start.unsqueeze(0), 
                     wall_end.unsqueeze(0)
                 )
                 
-                # 如果距离小于碰撞半径，给予惩罚
                 if wall_distance < collision_radius:
                     collision_penalty[env_id] = self.collision_penalty
                     break
@@ -518,24 +599,22 @@ class BerthingReward:
         return collision_penalty
     
     def _point_to_line_distance(self, point, line_start, line_end):
-        """计算点到线段的距离"""
+        """计算点到线段的距离（旧版本，保留作为备用）"""
         line_vec = line_end - line_start
         point_vec = point - line_start
         
         line_length = torch.norm(line_vec, dim=-1)
-        line_length = torch.clamp(line_length, min=1e-6)  # 避免除零
+        line_length = torch.clamp(line_length, min=1e-6)
         
-        # 计算投影参数
         t = torch.sum(point_vec * line_vec, dim=-1) / (line_length ** 2)
         t = torch.clamp(t, 0, 1)
         
-        # 最近点
         closest_point = line_start + t.unsqueeze(-1) * line_vec
         
         return torch.norm(point - closest_point, dim=-1)
     
     def _check_success(self, position_error, heading_error):
-        """检查是否成功泊船"""
+        """检查是否成功泊船（旧版本，保留作为备用）"""
         position_success = position_error < self.position_tolerance
         heading_success = heading_error < self.heading_tolerance
         success = position_success & heading_success

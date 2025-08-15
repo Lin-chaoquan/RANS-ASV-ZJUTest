@@ -7,7 +7,7 @@ experiment: USV_Virtual_Berthing-V1
 # if given, will override the device setting in gym. 
 env:
   numEnvs: ${resolve_default:512,${...num_envs}}
-  envSpacing: 5
+  envSpacing: 10
   maxEpisodeLength: 5000
   enableDebugVis: False
   action_mode: Continuous
@@ -307,5 +307,42 @@ dynamics:
   acceleration:
     alpha: 0.3
     last_time: -10.0
+
+task:
+  BerthingParameters:
+    # 泊船位参数
+    berth_width: 4.0  # 船位宽度
+    berth_length: 6.0  # 船位长度
+    goal_random_position: 0  # 船位中心随机范围（相对于网格点）
+    
+    # 碰撞检测参数
+    collision_radius: 0.5  # 船体安全半径
+    wall_distance_threshold: 0.8  # 墙距离阈值
+    
+    # 成功条件
+    position_tolerance: 0.2  # 位置容差
+    heading_tolerance: 0.1  # 航向容差
+    time_limit: 1000  # 时间限制
+    
+    # 生成参数
+    spawn_radius_min: 3.0  # 最小生成半径
+    spawn_radius_max: 8.0  # 最大生成半径
+    spawn_angle_range: 180  # 生成角度范围（度）
+    
+    # 终止条件
+    kill_after_n_steps_in_tolerance: 50  # 成功后在容差内停留步数
+    kill_dist: 15.0  # 杀死距离
+    boundary_cost: 50.0  # 边界惩罚
+    goal_reward: 1000.0  # 成功奖励
+    time_reward: -0.1  # 时间惩罚
+    
+    # 课程学习参数
+    spawn_curriculum: False
+    spawn_curriculum_min_dist: 2.0
+    spawn_curriculum_max_dist: 5.0
+    spawn_curriculum_kill_dist: 20.0
+    spawn_curriculum_mode: "linear"
+    spawn_curriculum_warmup: 250
+    spawn_curriculum_end: 1000
 
 
